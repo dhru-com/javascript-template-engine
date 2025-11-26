@@ -1,0 +1,53 @@
+{
+  "name": "javascript-template-engine",
+  "version": "0.2.0",
+  "description": "A tiny TypeScript template engine with helpers, partials, conditionals, loops, and HTML-escaping.",
+  "license": "MIT",
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "homepage": "",
+  "bugs": {
+    "url": ""
+  },
+  "keywords": [
+    "template",
+    "templating",
+    "typescript",
+    "helpers",
+    "partials",
+    "handlebars",
+    "mustache",
+    "string-template",
+    "lightweight"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rimraf dist",
+    "test": "npm run build && node --test tests/**/*.test.js",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
+    "dev": "tsc -w -p tsconfig.json"
+  },
+  "devDependencies": {
+    "rimraf": "^6.0.1",
+    "typescript": "^5.6.3"
+  }
+}
