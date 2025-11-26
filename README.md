@@ -1,9 +1,12 @@
 javascript-template-engine
 
+[![npm version](https://img.shields.io/npm/v/javascript-template-engine.svg)](https://www.npmjs.com/package/javascript-template-engine)
+
 A tiny, dependency-free TypeScript templating engine with variables, filters, partials, conditionals, loops, HTML-escaping, and more.
 
 Install
 - npm install javascript-template-engine
+- NPM: https://www.npmjs.com/package/javascript-template-engine
 
 Quick usage (TypeScript)
 ```
@@ -289,14 +292,6 @@ Release notes
   - Partials with context: `{{> name ctx}}`
   - New helpers: `upper`, `lower`, `capitalize`, `trim`, `length`, `join`, `number`, comparisons
   - Engine options: `escapeHtml`, `strict`
-
-Publish checklist
-1) Update `package.json` fields:
-   - `author` (dhru.com), `repository.url`, `homepage`, `bugs.url`.
-2) Build: `npm run build`
-3) Login: `npm login` (enable 2FA if required)
-4) Publish: `npm publish --access public`
-   - If the name is taken, change `name` in `package.json` and re-publish.
 
 License
 MIT
