@@ -94,6 +94,31 @@ test('each with meta vars and else', () => {
   assert.equal(out2, 'EMPTY');
 });
 
+test('Mustache sections (#) with arrays and objects', () => {
+  const engine = new TemplateEngine();
+  // Array context with {{.}}
+  const tpl1 = '{{#items}}(<{{.}}>){{/items}}';
+  const out1 = engine.render(tpl1, { items: ['a', 'b'] });
+  assert.equal(out1, '(<a>)(<b>)');
+
+  // Truthy object context merges and exposes fields
+  const tpl2 = '{{#user}}{{name}}-{{this.name}}{{/user}}';
+  const out2 = engine.render(tpl2, { user: { name: 'Ada' } });
+  // name becomes available and this.name equals it
+  assert.equal(out2, 'Ada-Ada');
+});
+
+test('Mustache inverted sections (^) render on falsey or empty)', () => {
+  const engine = new TemplateEngine();
+  const tpl1 = '{{^items}}NO ITEMS{{/items}}';
+  const out1 = engine.render(tpl1, { items: [] });
+  assert.equal(out1, 'NO ITEMS');
+
+  const tpl2 = '{{^ok}}no{{/ok}}';
+  const out2 = engine.render(tpl2, { ok: 0 });
+  assert.equal(out2, 'no');
+});
+
 test('partials without and with context', () => {
   const engine = new TemplateEngine();
   engine.registerPartial('card', 'P: {{title}} {{this.name}}');
@@ -101,6 +126,45 @@ test('partials without and with context', () => {
   assert.equal(out1, 'P: T '); // this.name is empty in root context
   const out2 = engine.render('{{> card user}}', { title: 'T', user: { name: 'User' } });
   assert.equal(out2, 'P: T User');
+});
+
+test('partial indentation semantics', () => {
+  const engine = new TemplateEngine();
+  engine.registerPartial('item', 'Line1\nLine2');
+  const tpl = 'A\n  {{> item}}\nB';
+  const out = engine.render(tpl, {});
+  assert.equal(out, 'A\n  Line1\n  Line2\nB');
+});
+
+test('standalone line trimming for sections and partials', () => {
+  const engine = new TemplateEngine();
+  engine.registerPartial('p', 'X');
+  const tpl = 'A\n{{#ok}}\nY\n{{/ok}}\n{{> p}}\nB';
+  const out = engine.render(tpl, { ok: true });
+  // Lines containing only tags should be trimmed
+  assert.equal(out, 'A\nY\nX\nB');
+});
+
+test('Mustache variable lambda', () => {
+  const engine = new TemplateEngine();
+  const data = {
+    greeting: function() { return 'Hello'; }
+  };
+  const out = engine.render('{{greeting}}, World!', data);
+  assert.equal(out, 'Hello, World!');
+});
+
+test('Mustache section lambda', () => {
+  const engine = new TemplateEngine();
+  const data = {
+    wrap: function(text, render) {
+      // text is unrendered block, render callback renders it
+      return '<b>' + render(text) + '</b>';
+    },
+    name: 'Ada'
+  };
+  const out = engine.render('{{#wrap}}{{name}}{{/wrap}}', data);
+  assert.equal(out, '<b>Ada</b>');
 });
 
 test('compile returns a reusable renderer', () => {
@@ -116,4 +180,15 @@ test('strict mode throws on unknown helper and partial', () => {
   assert.throws(() => engine.render('{{ x | noSuch }}', { x: 1 }), /Unknown helper/);
   // Unknown partial
   assert.throws(() => engine.render('{{> nope}}', {}), /Unknown partial/);
+});
+
+test('strictVariables throws on missing variable/path', () => {
+  const engine = new TemplateEngine({ strictVariables: true });
+  assert.throws(() => engine.render('Hi {{user.name}}', {}), /Unknown variable or path/);
+});
+
+test('custom escapeFn is used when escapeHtml is true', () => {
+  const engine = new TemplateEngine({ escapeHtml: true, escapeFn: (s) => s.replace(/</g, '[LT]').replace(/>/g, '[GT]') });
+  const out = engine.render('{{ html }}', { html: '<b>' });
+  assert.equal(out, '[LT]b[GT]');
 });

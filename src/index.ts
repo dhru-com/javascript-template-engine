@@ -3,14 +3,33 @@ export type HelperFn = (value: any, ...args: any[]) => any;
 
 export interface TemplateOptions {
   escapeHtml?: boolean; // escape by default for double braces
-  strict?: boolean; // throw on missing helpers/partials
+  escapeFn?: (input: string) => string; // custom escape strategy
+  strict?: boolean; // throw on missing helpers/partials/helpers
+  strictVariables?: boolean; // throw on missing variables/paths
+  cacheTemplates?: boolean; // enable compile() result caching by template string
+  cacheSize?: number; // max cached templates
+}
+
+function isDangerousKey(key: string): boolean {
+  return key === "__proto__" || key === "prototype" || key === "constructor";
 }
 
 function getValueByPath(obj: any, path: string): any {
-  return path.split(".").reduce((acc: any, key: string) => {
-    if (acc && acc[key] !== undefined) return acc[key];
-    return undefined;
-  }, obj);
+  if (path === ".") return obj && Object.prototype.hasOwnProperty.call(obj, "this") ? (obj as any).this : obj;
+  if (!path) return undefined;
+  const parts = path.split(".");
+  let acc: any = obj;
+  for (const rawKey of parts) {
+    const key = rawKey.trim();
+    if (!key) return undefined;
+    if (isDangerousKey(key)) return undefined;
+    if (acc && typeof acc === "object" && Object.prototype.hasOwnProperty.call(acc, key)) {
+      acc = acc[key];
+    } else {
+      return undefined;
+    }
+  }
+  return acc;
 }
 
 function formatDate(date: Date, pattern: string = "YYYY-MM-DD"): string {
@@ -49,13 +68,22 @@ export class TemplateEngine {
   private helpers: Map<string, HelperFn> = new Map();
   private partials: Map<string, string> = new Map();
   private options: Required<TemplateOptions>;
+  // simple LRU for compiled templates (by template string)
+  private tplCache?: Map<string, (data: DataObject) => string>;
 
   constructor(options?: TemplateOptions) {
     this.options = {
       escapeHtml: true,
+      escapeFn: (s: string) => escapeHtml(s),
       strict: false,
+      strictVariables: false,
+      cacheTemplates: false,
+      cacheSize: 200,
       ...(options || {}),
     };
+    if (this.options.cacheTemplates) {
+      this.tplCache = new Map();
+    }
     // Built-in helpers / filters
     this.registerHelper("default", (value, fallback) => {
       return value === undefined || value === null || value === "" ? fallback : value;
@@ -63,7 +91,9 @@ export class TemplateEngine {
 
     this.registerHelper("json", (value, space?: string | number) => {
       const n = typeof space === "string" ? parseInt(space, 10) : space;
-      return JSON.stringify(value, null, Number.isFinite(n as number) ? (n as number) : 0);
+      const json = JSON.stringify(value, null, Number.isFinite(n as number) ? (n as number) : 0);
+      // Mark JSON as safe so quotes/braces are not HTML-escaped
+      return new SafeString(json);
     });
 
     this.registerHelper("date", (value, pattern: string = "YYYY-MM-DD") => {
@@ -115,14 +145,35 @@ export class TemplateEngine {
   }
 
   setOptions(options: TemplateOptions): void {
+    const prevCache = this.options.cacheTemplates;
     this.options = { ...this.options, ...(options || {}) } as Required<TemplateOptions>;
+    if (this.options.cacheTemplates && !this.tplCache) {
+      this.tplCache = new Map();
+    }
+    if (!this.options.cacheTemplates && prevCache && this.tplCache) {
+      this.tplCache.clear();
+      this.tplCache = undefined;
+    }
   }
 
   compile(template: string): (data: DataObject) => string {
+    if (this.tplCache) {
+      const cached = this.tplCache.get(template);
+      if (cached) return cached;
+      const fn = (data: DataObject) => this.render(template, data);
+      // LRU discipline: move to end when (re)inserted
+      this.tplCache.set(template, fn);
+      if (this.tplCache.size > this.options.cacheSize) {
+        // delete oldest
+        const firstKey = this.tplCache.keys().next().value as string | undefined;
+        if (firstKey !== undefined) this.tplCache.delete(firstKey);
+      }
+      return fn;
+    }
     return (data: DataObject) => this.render(template, data);
   }
 
-  private applyFilters(initialValue: any, filterParts: string[]): any {
+  private applyFilters(initialValue: any, filterParts: string[], data: DataObject): any {
     return filterParts.reduce((value, rawFilter) => {
       if (!rawFilter) return value;
 
@@ -142,14 +193,17 @@ export class TemplateEngine {
         // support comma-separated args: date:"YYYY-MM-DD HH:mm",json:2
         args = rawArgs.split(",").map((s) => {
           let v = s.trim();
-          // strip quotes if present
-          if (
-            (v.startsWith('"') && v.endsWith('"')) ||
-            (v.startsWith("'") && v.endsWith("'"))
-          ) {
-            v = v.slice(1, -1);
+          // if quoted, treat as literal string (strip quotes)
+          if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+            return v.slice(1, -1);
           }
-          return v;
+          // numeric literal
+          if (/^[+-]?\d+(?:\.\d+)?$/.test(v)) {
+            return Number(v);
+          }
+          // attempt to resolve as a data path
+          const resolved = getValueByPath(data, v);
+          return resolved !== undefined ? resolved : v;
         });
       }
 
@@ -160,13 +214,30 @@ export class TemplateEngine {
   render(template: string, data: DataObject): string {
     let output = template;
 
+    // Precompiled regexes (hoisted for small perf gain)
+    const RE_LINE_COMMENT = /{{!\s*[^}]*}}/g;
+    const RE_BLOCK_COMMENT = /{{!--[\s\S]*?--}}/g;
+    // Indentation-aware partial (m flag to catch line starts)
+    const RE_PARTIAL_WITH_INDENT = /(^[ \t]*){{>\s*([\w.]+)(?:\s+([^}]+))?\s*}}/gm;
+    const RE_IF = /{{#if ([^}]+)}}([\s\S]*?){{\/if}}/g;
+    const RE_UNLESS = /{{#unless ([^}]+)}}([\s\S]*?){{\/unless}}/g;
+    const RE_EACH = /{{#each ([^}]+)}}([\s\S]*?){{\/each}}/g;
+    const RE_TRIPLE = /{{{\s*([^}]+)\s*}}}/g;
+    const RE_VAR = /{{\s*([^}]+)\s*}}/g;
+    const RE_ELSE_SPLIT = /{{\s*else\s*}}/;
+    const RE_SECTION = /{{#\s*([\w.]+)\s*}}([\s\S]*?){{\/\s*\1\s*}}/g; // Mustache section
+    const RE_INVERTED = /{{\^\s*([\w.]+)\s*}}([\s\S]*?){{\/\s*\1\s*}}/g; // Mustache inverted
+    // Standalone lines: trim lines that contain only a tag (per Mustache spec subset)
+    // Consume the trailing newline so we don't leave an extra blank line
+    const RE_STANDALONE = /(^|\r?\n)[ \t]*{{(?:![\s\S]*?|>\s*[\w.]+(?:\s+[^}]+)?|[#\/^][^}]*)}}[ \t]*(?:\r?\n|$)/g;
+
     // Comments (single-line and block): {{! ...}} and {{!-- ... --}}
-    output = output.replace(/{{!\s*[^}]*}}/g, "");
-    output = output.replace(/{{!--[\s\S]*?--}}/g, "");
+    output = output.replace(RE_LINE_COMMENT, "");
+    output = output.replace(RE_BLOCK_COMMENT, "");
 
     // Partials: {{> name}}
-    // Also supports context: {{> name contextPath}}
-    output = output.replace(/{{>\s*([\w.]+)(?:\s+([^}]+))?\s*}}/g, (_match, name, ctx) => {
+    // Also supports context: {{> name contextPath}} and indentation semantics
+    output = output.replace(RE_PARTIAL_WITH_INDENT, (_match, indent, name, ctx) => {
       const partialName = String(name).trim();
       const partial = this.partials.get(partialName);
       if (!partial) {
@@ -179,32 +250,74 @@ export class TemplateEngine {
         if (resolved && typeof resolved === "object") ctxData = { ...data, ...resolved, this: resolved };
         else ctxData = { ...data, this: resolved };
       }
-      // Render partial content with provided or same data context
-      return this.render(partial, ctxData);
+      const rendered = this.render(partial, ctxData);
+      if (!indent) return rendered;
+      // Apply indentation to each line of the partial
+      return String(rendered).split(/\r?\n/).map((line, i) => (i === 0 ? indent + line : (line.length ? indent + line : line))).join("\n");
+    });
+
+    // Standalone trimming (after partial expansion to preserve indentation semantics)
+    output = output.replace(RE_STANDALONE, (_m, p1) => (p1 ? p1 : ""));
+
+    // Mustache sections: {{#section}} ... {{/section}}
+    output = output.replace(RE_SECTION, (_m, name, block) => {
+      const key = String(name).trim();
+      const value = getValueByPath(data, key);
+      // Lambda section: function receives unrendered text and a render callback
+      if (typeof value === "function") {
+        try {
+          const lambdaResult = value.call(data, String(block), (tmpl: string) => this.render(String(tmpl), data));
+          return typeof lambdaResult === "string" ? this.render(lambdaResult, data) : String(lambdaResult ?? "");
+        } catch {
+          return "";
+        }
+      }
+      if (Array.isArray(value)) {
+        if (value.length === 0) return "";
+        return value
+          .map((item) => {
+            const ctx = typeof item === "object" && item !== null ? { ...data, ...item, this: item } : { ...data, this: item };
+            return this.render(String(block), ctx);
+          })
+          .join("");
+      }
+      if (value) {
+        const ctx = typeof value === "object" ? { ...data, ...value, this: value } : { ...data, this: value };
+        return this.render(String(block), ctx);
+      }
+      return "";
+    });
+
+    // Mustache inverted sections: {{^section}} ... {{/section}}
+    output = output.replace(RE_INVERTED, (_m, name, block) => {
+      const key = String(name).trim();
+      const value = getValueByPath(data, key);
+      const shouldRender = Array.isArray(value) ? value.length === 0 : !value;
+      return shouldRender ? this.render(String(block), data) : "";
     });
 
     // IF: {{#if cond}} ... {{/if}}
-    output = output.replace(/{{#if ([^}]+)}}([\s\S]*?){{\/if}}/g, (_match, condition, content) => {
+    output = output.replace(RE_IF, (_match, condition, content) => {
       const value = getValueByPath(data, String(condition).trim());
-      const parts = String(content).split(/{{\s*else\s*}}/);
+      const parts = String(content).split(RE_ELSE_SPLIT);
       return value ? parts[0] ?? "" : parts[1] ?? "";
     });
 
     // UNLESS: {{#unless cond}} ... {{/unless}}
     output = output.replace(
-      /{{#unless ([^}]+)}}([\s\S]*?){{\/unless}}/g,
+      RE_UNLESS,
       (_match, condition, content) => {
         const value = getValueByPath(data, String(condition).trim());
-        const parts = String(content).split(/{{\s*else\s*}}/);
+        const parts = String(content).split(RE_ELSE_SPLIT);
         return !value ? parts[0] ?? "" : parts[1] ?? "";
       }
     );
 
     // EACH: {{#each items}} ... {{/each}}
-    output = output.replace(/{{#each ([^}]+)}}([\s\S]*?){{\/each}}/g, (_match, path, blockContent) => {
+    output = output.replace(RE_EACH, (_match, path, blockContent) => {
       const arr = getValueByPath(data, String(path).trim());
       const content = String(blockContent);
-      const parts = content.split(/{{\s*else\s*}}/);
+      const parts = content.split(RE_ELSE_SPLIT);
       const loopTpl = parts[0] ?? "";
       const emptyTpl = parts[1] ?? "";
       if (!Array.isArray(arr) || arr.length === 0) return emptyTpl;
@@ -212,6 +325,8 @@ export class TemplateEngine {
         .map((item, idx) => {
           // Simple support: {{this}} and meta vars
           let rendered = String(loopTpl).replace(/{{\s*this\s*}}/g, String(item));
+          // Support Mustache current item token {{.}}
+          rendered = rendered.replace(/{{\s*\.\s*}}/g, String(item));
           rendered = rendered.replace(/{{\s*@index\s*}}/g, String(idx));
           rendered = rendered.replace(/{{\s*@first\s*}}/g, idx === 0 ? "true" : "");
           rendered = rendered.replace(/{{\s*@last\s*}}/g, idx === (arr.length - 1) ? "true" : "");
@@ -222,19 +337,23 @@ export class TemplateEngine {
     });
 
     // Triple mustaches: {{{ expr }}} — never escape
-    output = output.replace(/{{{\s*([^}]+)\s*}}}/g, (_m, inner) => {
+    output = output.replace(RE_TRIPLE, (_m, inner) => {
       const raw = String(inner).trim();
       const segments = raw.split("|").map((s) => s.trim());
       const path = segments[0];
       const filters = segments.slice(1);
-      let value = getValueByPath(data, path);
-      if (filters.length > 0) value = this.applyFilters(value, filters);
+      let value: any = path === "." ? (Object.prototype.hasOwnProperty.call(data, "this") ? (data as any).this : data) : getValueByPath(data, path);
+      // Variable lambda: call and use returned string
+      if (typeof value === "function") {
+        try { value = value.call(data); } catch { value = ""; }
+      }
+      if (filters.length > 0) value = this.applyFilters(value, filters, data);
       if (value === undefined || value === null) return "";
       return String(value);
     });
 
     // Variables + Filters: {{ expr | filter:arg }}
-    output = output.replace(/{{\s*([^}]+)\s*}}/g, (_match, inner) => {
+    output = output.replace(RE_VAR, (_match, inner) => {
       const raw = String(inner).trim();
 
       // Skip block tags / partials (already processed)
@@ -247,17 +366,27 @@ export class TemplateEngine {
       const path = segments[0];
       const filters = segments.slice(1);
 
-      let value = getValueByPath(data, path);
+      let value: any = getValueByPath(data, path);
 
-      if (filters.length > 0) {
-        value = this.applyFilters(value, filters);
+      // Variable lambda: call and use returned string
+      if (typeof value === "function") {
+        try { value = value.call(data); } catch { value = ""; }
       }
 
-      if (value === undefined || value === null) return "";
+      if (filters.length > 0) {
+        value = this.applyFilters(value, filters, data);
+      }
+
+      if (value === undefined || value === null) {
+        if (this.options.strictVariables) {
+          throw new Error(`Unknown variable or path: ${path}`);
+        }
+        return "";
+      }
       const str = String(value);
       // If value is a SafeString or escape is disabled, return as is
       const isSafe = value instanceof SafeString;
-      return this.options.escapeHtml && !isSafe ? escapeHtml(str) : str;
+      return this.options.escapeHtml && !isSafe ? this.options.escapeFn(str) : str;
     });
 
     return output;

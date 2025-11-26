@@ -1,16 +1,16 @@
 {
   "name": "javascript-template-engine",
-  "version": "0.2.0",
-  "description": "A tiny TypeScript template engine with helpers, partials, conditionals, loops, and HTML-escaping.",
+  "version": "1.1.0",
+  "description": "A fast, more-powerful-than-Mustache TypeScript template engine: helpers/filters, partials (with indentation), conditionals, loops, Mustache sections, lambdas, and safe HTML-escaping.",
   "license": "MIT",
-  "author": "",
+  "author": "dhru.com",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/dhru-com/javascript-template-engine.git"
   },
-  "homepage": "",
+  "homepage": "https://github.com/dhru-com/javascript-template-engine#readme",
   "bugs": {
-    "url": ""
+    "url": "https://github.com/dhru-com/javascript-template-engine/issues"
   },
   "keywords": [
     "template",
@@ -20,31 +20,37 @@
     "partials",
     "handlebars",
     "mustache",
+    "mustache-compatible",
     "string-template",
-    "lightweight"
+    "lightweight",
+    "performance"
   ],
   "engines": {
     "node": ">=18"
   },
   "main": "dist/index.js",
+  "module": "dist/esm/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": "./dist/esm/index.js"
     }
   },
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "dist/esm"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.esm.json",
     "clean": "rimraf dist",
     "test": "npm run build && node --test tests/**/*.test.js",
     "prepublishOnly": "npm run build",
     "prepare": "npm run build",
-    "dev": "tsc -w -p tsconfig.json"
+    "dev": "tsc -w -p tsconfig.json",
+    "bench": "npm run build && node bench/bench.js"
   },
   "devDependencies": {
     "rimraf": "^6.0.1",
